@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+    <head>
+        <title>modplay</title>
+        <script type='text/javascript' src='libmodplug.js'></script>
+    </head>
+    <body>
+        <h1>libmodplugjs</h1>
+        <p>Drag a .mod/.s3m/.it/.xm file onto here and listen to it play! HTML5 ~~ THE PLATFORM OF THE FUTURE
+        (Uses libmodplug, compiled via emscripten)</p>
+        <p>Known issues: For some reason songs abruptly end, or start in the middle, or don't play at all (.xm). Looping is also messed, so it's temporarily disabled (seek to start sort of worked, actually settting mLoopCount in an ModPlug_Settings struct gets ignored). These are probably caused by reliance on undefined behaviour in libmodplug, since the same exact version of this library works in a C++ project of mine without issues. It might have something to do with emscripten compilation settings, or... my audio reading code is messed?</p>
+
+        FILE: <input class='filepicker' type='file'>
+        <script type='text/javascript'>
+            var AudioContext = window.AudioContext || window.webkitAudioContext;
+            console.log(AudioContext);
+            var context = new AudioContext();
+            var scr = null;
+
+            var ModPlug_Load = Module.cwrap('ModPlug_Load', 'number', ['number', 'number']);
+            var ModPlug_Unload = Module.cwrap('ModPlug_Unload', null, ['number']);
+            var ModPlug_Read = Module.cwrap('ModPlug_Read', 'number', ['number', 'number', 'number']);
+            var ModPlug_Seek = Module.cwrap('ModPlug_Seek', null, ['number', 'number']);
+
+            var ModPlugFile = function(data, sampleCount, channelCount) {
+                var self = {};
+                var source = Module._malloc(data.length);
+                Module.HEAPU8.set(data, source);
+                console.log(data.length);
+                var file = ModPlug_Load(source, data.length);
+
+                console.log(context);
+                var ratio = 44100 / context.sampleRate;
+                var iratio = context.sampleRate / 44100;
+                var get = Module.getValue;
+
+                var bytesPerSample = 2;
+                var buffer = Module._malloc(sampleCount * ratio * channelCount * bytesPerSample);
+
+                self.read = function(left, right, start, size) {
+                    var asked = (size * ratio) | 0;
+                    console.log('ask', size, asked);
+                    var received = (ModPlug_Read(file, buffer, asked * channelCount * bytesPerSample) / channelCount / bytesPerSample) | 0;
+                    console.log('recv', Math.ceil(received * iratio), received);
+
+                    // Really shit resampling.
+                    var i = 0;
+                    var j = 0;
+                    while (true) {
+                        var i = (j * ratio) | 0;
+                        if (i < received) {
+                            left[start + j] = get(buffer + (i * channelCount) * bytesPerSample, 'i16') / 32767.0;
+                            right[start + j] = get(buffer + (i * channelCount + 1) * bytesPerSample, 'i16') / 32767.0;
+                            j++;
+                        } else {
+                            break;
+                        }
+                    } 
+
+                    return Math.ceil(received * iratio);
+                }
+
+                self.unload = function() {
+                    ModPlug_Unload(file);
+                }
+
+                self.seek = function(pos) {
+                    ModPlug_Seek(file, pos);
+                }
+
+                return self;
+            }
+
+            var currentModule;
+
+            document.ondragover = function() { return false; };
+            document.ondragend = function() { return false; };
+            var changeFile = function(e) {
+                e.preventDefault();
+
+                var files = (e.dataTransfer ? e.dataTransfer : e.target).files;
+                if(files.length) {
+                    var file = files[0];
+                    var reader = new FileReader();
+                    reader.onload = function(event) {
+                        if(currentModule) {
+                            currentModule.unload();
+                        }
+
+                        var sampleCount = 4096;
+                        var channelCount = 2;
+                        var mod = ModPlugFile(new Uint8Array(this.result), sampleCount, channelCount);
+
+                        if(!scr) {
+                            scr = context.createScriptProcessor(sampleCount, 1, channelCount);
+                        } else {
+                            scr.onaudioprocess = null
+                        }
+
+                        scr.onaudioprocess = function(e) {
+                            var left = e.outputBuffer.getChannelData(0);
+                            var right = e.outputBuffer.getChannelData(1);
+                            var have = 0;
+                            var need = sampleCount;
+
+                            if(!currentModule) {
+                                for(var i = 0; i < need; i++) {
+                                    left[i] = 0;
+                                    right[i] = 0;
+                                }
+                                return;
+                            }
+
+                            do {
+                                var got = currentModule.read(left, right, have, need - have);
+                                if(!got) {
+                                    currentModule.seek(0);
+                                    continue;
+                                    /*currentModule = null;
+                                    return;*/
+                                }
+                                have += got;
+                            } while(have < need);
+                        }
+                        scr.connect(context.destination);
+
+                        currentModule = mod;
+                    }
+                    reader.readAsArrayBuffer(file);
+                }
+                return false;
+            }
+
+            document.ondrop = changeFile;
+            document.querySelector('.filepicker').addEventListener('change', changeFile);
+
+        </script>
+    </body>
+</html>
